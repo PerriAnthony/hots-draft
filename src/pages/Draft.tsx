@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { generatePin } from '../utils/logic'
 import type { HOTSRank } from '../state/types'
 
 const RANKS: HOTSRank[] = ['Bronze','Silver','Gold','Platinum','Diamond','Master','Grandmaster']
+
+type RP = { room_id:string; player_id:string; team:1|2|null; name:string; rank:HOTSRank }
+type PickRow = { room_id:string; player_id:string; choices:string[]; indicated:string|null }
+type Chat = { id:number; room_id:string; team:1|2; sender:string; text:string; created_at:string }
 
 export default function Draft(){
   const [roomId, setRoomId] = useState<string|null>(null)
@@ -11,30 +14,72 @@ export default function Draft(){
   const [name, setName] = useState('')
   const [rank, setRank] = useState<HOTSRank>('Gold')
   const [isHost, setIsHost] = useState(false)
-  const [players, setPlayers] = useState<any[]>([])
+
+  const [players, setPlayers] = useState<RP[]>([])
+  const [picks, setPicks] = useState<Record<string, PickRow>>({})
+  const [meId, setMeId] = useState<string>('')
+  const [myTeam, setMyTeam] = useState<1|2|null>(null)
   const [locked, setLocked] = useState(false)
   const [revealed, setRevealed] = useState(false)
 
-  const allHeroes = useMemo(()=>DEFAULT_HEROES,[])
+  const [chat, setChat] = useState<Chat[]>([])
+  const [chatText, setChatText] = useState('')
+  const chatBoxRef = useRef<HTMLDivElement>(null)
 
-  // minimal polling to show connected players (replace with realtime if desired)
+  // AUTOSCROLL chat
+  useEffect(()=>{
+    if(chatBoxRef.current){
+      chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight
+    }
+  }, [chat])
+
+  // polling for room state, players, picks, chat
   useEffect(()=>{
     const int = setInterval(async ()=>{
       if(!roomId) return
-      const { data: rp } = await supabase.from('room_players_full').select('*').eq('room_id', roomId)
-      setPlayers(rp ?? [])
+
+      // room status
       const { data: r } = await supabase.from('rooms').select('status').eq('id', roomId).single()
       if(r){
         setLocked(r.status === 'locked' || r.status === 'revealed' || r.status === 'closed')
         setRevealed(r.status === 'revealed' || r.status === 'closed')
       }
+
+      // connected players
+      const { data: rp } = await supabase.from('room_players_full').select('*').eq('room_id', roomId)
+      const playerRows = (rp ?? []) as any[]
+      setPlayers(playerRows as RP[])
+
+      // derive my team
+      if(meId){
+        const meRow = playerRows.find(p => p.player_id === meId)
+        setMyTeam(meRow?.team ?? null)
+      }
+
+      // picks
+      const { data: pk } = await supabase.from('picks').select('*').eq('room_id', roomId)
+      const pkMap: Record<string, PickRow> = {}
+      ;(pk ?? []).forEach((row:any) => { pkMap[row.player_id] = row })
+      setPicks(pkMap)
+
+      // team chat
+      if(myTeam){
+        const { data: msgs } = await supabase
+          .from('team_chat')
+          .select('*')
+          .eq('room_id', roomId)
+          .eq('team', myTeam)
+          .order('created_at', { ascending: true })
+          .limit(200)
+        setChat((msgs ?? []) as Chat[])
+      }
     }, 1000)
     return ()=> clearInterval(int)
-  },[roomId])
+  }, [roomId, meId, myTeam])
 
   async function createRoom(){
-    const newPin = generatePin()
-    const { data: r, error } = await supabase.from('rooms').insert({ pin: newPin, status:'open' }).select().single()
+    // create or find self as player first so host_id can be set if desired
+    const { data: r, error } = await supabase.from('rooms').insert({ pin: generatePin(), status:'open' }).select().single()
     if(error) return alert(error.message)
     setRoomId(r.id); setPin(r.pin); setIsHost(true)
   }
@@ -46,18 +91,54 @@ export default function Draft(){
 
   async function submitIdentity(){
     if(!roomId) return
-    const { data: p, error } = await supabase.from('players').insert({ name, rank }).select().single()
-    if(error) return alert(error.message)
-    await supabase.from('room_players').insert({ room_id: roomId, player_id: p!.id })
+    const { data: existing } = await supabase
+      .from('players').select('*').eq('name', name).maybeSingle()
+
+    let playerId = existing?.id
+    if(!playerId){
+      const { data: p, error } = await supabase.from('players').insert({ name, rank }).select().single()
+      if(error) return alert(error.message)
+      playerId = p!.id
+    }else{
+      // keep rank up to date (optional)
+      await supabase.from('players').update({ rank }).eq('id', playerId)
+    }
+
+    setMeId(playerId!)
+    await supabase.from('room_players').insert({ room_id: roomId, player_id: playerId }).onConflict('room_id,player_id').ignore()
+
+    // if no host set, set host to first joiner (optional)
+    const { data: room } = await supabase.from('rooms').select('host_id').eq('id', roomId).single()
+    if(!room?.host_id){
+      await supabase.from('rooms').update({ host_id: playerId }).eq('id', roomId)
+      setIsHost(true)
+    }
   }
 
   async function generateTeamsOnce(){
     if(!roomId) return
     const { data: rp } = await supabase.from('room_players_full').select('*').eq('room_id', roomId)
     if(!rp || rp.length!==6) return alert('Need exactly 6 players')
-    const { error } = await supabase.rpc('generate_teams_and_choices',{ p_room_id: roomId })
+    const { error } = await supabase.rpc('generate_teams_and_choices', { p_room_id: roomId })
     if(error) return alert(error.message)
     setLocked(true)
+  }
+
+  async function indicatePick(hero:string){
+    if(!roomId || !meId) return
+    const { data: row } = await supabase.from('picks').select('*').eq('room_id', roomId).eq('player_id', meId).single()
+    if(!row){
+      alert('No picks found for you yet. Did the host generate teams?')
+      return
+    }
+    const { error } = await supabase.from('picks').update({ indicated: hero }).eq('room_id', roomId).eq('player_id', meId)
+    if(error) alert(error.message)
+  }
+
+  async function voteReroll(){
+    if(!roomId || !meId) return
+    const { error } = await supabase.from('reroll_votes').insert({ room_id: roomId, voter: meId })
+    if(error) return alert(error.message)
   }
 
   async function lockAndReveal(){
@@ -73,6 +154,22 @@ export default function Draft(){
     if(error) return alert(error.message)
     alert('Saved!')
   }
+
+  async function sendChat(){
+    if(!roomId || !myTeam || !name || !chatText.trim()) return
+    const { error } = await supabase.from('team_chat').insert({
+      room_id: roomId,
+      team: myTeam,
+      sender: name,
+      text: chatText.trim()
+    })
+    if(error) return alert(error.message)
+    setChatText('')
+  }
+
+  // derive my teammates and renders
+  const teamMates = players.filter(p => p.team && p.team === myTeam)
+  const otherTeam = players.filter(p => p.team && p.team !== myTeam)
 
   return (
     <div className='grid gap-4'>
@@ -99,6 +196,7 @@ export default function Draft(){
             {RANKS.map(r=> <option key={r}>{r}</option>)}
           </select>
           <button className='btn btn-primary mt-3' onClick={submitIdentity} disabled={!roomId}>Submit</button>
+          {myTeam && <div className='text-sm text-neutral-400 mt-2'>Your team: <span className='badge ml-1'>Team {myTeam}</span></div>}
         </div>
         <div className='md:col-span-2'>
           <div className='flex items-center justify-between'>
@@ -111,7 +209,8 @@ export default function Draft(){
             {players.map(p=> (
               <li key={p.player_id} className='border border-neutral-800 rounded-xl p-2 text-sm'>
                 <div className='font-medium'>{p.name}</div>
-                <div className='text-neutral-400'>{p.rank}</div>
+                <div className='text-neutral-400'>Rank: {p.rank}</div>
+                <div className='text-neutral-500'>{p.team ? `Team ${p.team}` : '—'}</div>
               </li>
             ))}
           </ul>
@@ -122,18 +221,65 @@ export default function Draft(){
         <div className='grid md:grid-cols-2 gap-4'>
           <div className='card'>
             <h3 className='font-semibold mb-2'>Your Team</h3>
-            <p className='text-sm text-neutral-400'>Show teammates & their 3 options (same team only).</p>
+            {!myTeam && <p className='text-sm text-neutral-400'>Waiting for team assignment…</p>}
+            {!!myTeam && (
+              <ul className='space-y-2'>
+                {teamMates.map(tm => {
+                  const pk = picks[tm.player_id]
+                  return (
+                    <li key={tm.player_id} className='border border-neutral-800 rounded-xl p-3'>
+                      <div className='text-sm font-medium'>{tm.name} {tm.player_id===meId && <span className="badge ml-2">You</span>}</div>
+                      <div className='mt-1 flex flex-wrap gap-2'>
+                        {(pk?.choices ?? []).map(hero => (
+                          <button
+                            key={hero}
+                            className={'btn ' + (tm.player_id===meId ? 'btn-primary' : '')}
+                            disabled={tm.player_id!==meId}
+                            onClick={()=>indicatePick(hero)}
+                            title={tm.player_id===meId ? 'Indicate you will pick this hero' : 'Only the player can indicate'}
+                          >
+                            {hero}
+                          </button>
+                        ))}
+                      </div>
+                      {pk?.indicated && (
+                        <div className='text-xs text-neutral-400 mt-1'>
+                          Indicated: <span className='badge ml-1'>{pk.indicated}</span>
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
           </div>
           <div className='card'>
             <h3 className='font-semibold mb-2'>Team Chat</h3>
-            <p className='text-sm text-neutral-400'>Add chat UI here (team-scoped).</p>
+            {!myTeam && <p className='text-sm text-neutral-400'>Join/submit identity to chat.</p>}
+            {!!myTeam && (
+              <>
+                <div ref={chatBoxRef} className='border border-neutral-800 rounded-xl p-2 h-64 overflow-auto text-sm space-y-1 bg-neutral-950/40'>
+                  {chat.map((m, i)=> (
+                    <div key={i}>
+                      <span className='text-neutral-400'>{new Date(m.created_at).toLocaleTimeString()} </span>
+                      <span className='font-medium'>{m.sender}: </span>
+                      <span>{m.text}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className='flex gap-2 mt-2'>
+                  <input className='input' placeholder='Type message…' value={chatText} onChange={e=>setChatText(e.target.value)} />
+                  <button className='btn' onClick={sendChat}>Send</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
 
       {locked && !revealed && (
         <div className='flex items-center gap-2'>
-          <button className='btn' onClick={async()=>{ if(!roomId) return; await supabase.from('reroll_votes').insert({ room_id: roomId }); }}>Reroll</button>
+          <button className='btn' onClick={voteReroll}>Reroll</button>
           {isHost && <button className='btn btn-primary' onClick={lockAndReveal}>Lock & Reveal</button>}
         </div>
       )}
@@ -152,6 +298,6 @@ export default function Draft(){
   )
 }
 
-const DEFAULT_HEROES = [
-  'Abathur','Alarak','Alexstrasza','Ana','Anduin','Anub\'arak','Artanis','Arthas','Auriel','Azmodan','Blaze','Brightwing','Cassia','Chen','Chromie','D.Va','Deckard','Dehaka','Diablo','E.T.C.','Falstad','Fenix','Gazlowe','Genji','Greymane','Gul\'dan','Hanzo','Hogger','Illidan','Imperius','Jaina','Johanna','Junkrat','Kael\'thas','Kerrigan','Kharazim','Li Li','Li-Ming','Lt. Morales','Lunara','Maiev','Mal\'Ganis','Malfurion','Malthael','Mei','Mephisto','Muradin','Murky','Nazeebo','Nova','Orphea','Probius','Qhira','Ragnaros','Raynor','Rehgar','Rexxar','Samuro','Sonya','Stitches','Stukov','Sylvanas','Tassadar','Thrall','Tracer','Tychus','Tyrael','Tyrande','Uther','Valeera','Valla','Varian','Whitemane','Xul','Yrel','Zagara','Zarya','Zeratul','Zul\'jin'
-]
+function generatePin(){
+  return Math.floor(1000 + Math.random()*9000).toString()
+}
