@@ -278,25 +278,22 @@ export default function Draft(){
       )}
 
       {locked && !revealed && (
-        <div className='flex items-center gap-2'>
-          <button className='btn' onClick={voteReroll}>Reroll</button>
-          {isHost && <button className='btn btn-primary' onClick={lockAndReveal}>Lock & Reveal</button>}
-        </div>
-      )}
-
-      {revealed && (
-        <div className='card'>
-          <h3 className='font-semibold mb-2'>Reveal</h3>
-          <p className='text-sm text-neutral-300'>All picks revealed. Choose winner:</p>
-          <div className='mt-2 flex gap-2'>
-            <button className='btn btn-primary' onClick={()=>saveResult(1)}>Team 1 Won</button>
-            <button className='btn btn-primary' onClick={()=>saveResult(2)}>Team 2 Won</button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
+  <div className='flex items-center gap-3 flex-wrap'>
+    <button className='btn' onClick={voteReroll}>Reroll</button>
+    {(() => {
+      const allIndicated = players.length === 6 && players.every(p => (picks[p.player_id]?.indicated ?? null));
+      return (
+        <button
+          className={'btn btn-primary ' + (!allIndicated ? 'opacity-60 cursor-not-allowed' : '')}
+          onClick={allIndicated ? lockAndReveal : undefined}
+          title={allIndicated ? 'Reveal all picks' : 'All 6 players must indicate a pick before reveal'}
+        >
+          Lock & Reveal
+        </button>
+      );
+    })()}
+  </div>
+)}
 
 function generatePin(){
   return Math.floor(1000 + Math.random()*9000).toString()
