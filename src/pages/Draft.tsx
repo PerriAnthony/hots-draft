@@ -105,7 +105,7 @@ export default function Draft(){
     }
 
     setMeId(playerId!)
-    await supabase.from('room_players').insert({ room_id: roomId, player_id: playerId }).onConflict('room_id,player_id').ignore()
+    await supabase.from('room_players').upsert({ room_id: roomId, player_id: playerId }, { onConflict: 'room_id,player_id', ignoreDuplicates: true })
 
     // if no host set, set host to first joiner (optional)
     const { data: room } = await supabase.from('rooms').select('host_id').eq('id', roomId).single()
