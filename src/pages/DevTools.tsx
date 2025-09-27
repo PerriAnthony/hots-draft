@@ -2,17 +2,28 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
 type Player = { id: string; name: string; rank: string }
+type Participant = { team: 1 | 2; hero: string | null; name: string }
+type MatchAdmin = {
+  id: string
+  created_at: string
+  winner_team: 1 | 2 | null
+  participants: Participant[] | null
+}
 
 export default function DevTools() {
   // simple gate
   const [pw, setPw] = useState('')
   const [ok, setOk] = useState(false)
 
-  // data
+  // players
   const [players, setPlayers] = useState<Player[]>([])
   const [mergeFromId, setMergeFromId] = useState('')
   const [mergeIntoId, setMergeIntoId] = useState('')
   const [deleteId, setDeleteId] = useState('')
+
+  // matches
+  const [matches, setMatches] = useState<MatchAdmin[]>([])
+  const [loadingMatches, setLoadingMatches] = useState(false)
 
   function unlock() {
     if (pw === 'hotsadmin') setOk(true)
@@ -31,8 +42,26 @@ export default function DevTools() {
     setPlayers((data ?? []) as Player[])
   }
 
+  async function loadMatches() {
+    setLoadingMatches(true)
+    const { data, error } = await supabase
+      .from('match_admin')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50)
+    setLoadingMatches(false)
+    if (error) {
+      alert(error.message)
+      return
+    }
+    setMatches((data ?? []) as MatchAdmin[])
+  }
+
   useEffect(() => {
-    if (ok) loadPlayers()
+    if (ok) {
+      loadPlayers()
+      loadMatches()
+    }
   }, [ok])
 
   const byId = useMemo(
@@ -40,7 +69,7 @@ export default function DevTools() {
     [players]
   )
 
-  // --- Merge two players (case-insensitive on the server) ---
+  // --- Merge two players (server is case-insensitive and robust) ---
   async function mergePlayers() {
     if (!mergeFromId || !mergeIntoId) {
       alert('Select both players')
@@ -57,7 +86,7 @@ export default function DevTools() {
       return
     }
 
-    const { error } = await supabase.rpc('merge_players', {
+    const { data, error } = await supabase.rpc('merge_players', {
       p_from_name: fromName,
       p_into_name: intoName,
     })
@@ -66,10 +95,12 @@ export default function DevTools() {
       return
     }
 
-    alert(`Merged "${fromName}" into "${intoName}"`)
+    const merged = (data as any)?.merged_from_count ?? 0
+    alert(`Merged ${merged} duplicate player(s) into “${(data as any)?.into_name ?? intoName}”.`)
     setMergeFromId('')
     setMergeIntoId('')
     await loadPlayers()
+    await loadMatches() // in case names display inside participants
   }
 
   // --- Delete all case-insensitive variants of a name ---
@@ -90,7 +121,6 @@ export default function DevTools() {
     )
       return
 
-    // Canonical delete by name (server deletes all variants: Perri/perri/PERRI)
     const { data, error } = await supabase.rpc('delete_player_canonical', {
       p_name: p.name,
     })
@@ -102,6 +132,18 @@ export default function DevTools() {
     alert(`Deleted ${data ?? 0} player record(s) for "${p.name}"`)
     setDeleteId('')
     await loadPlayers()
+    await loadMatches()
+  }
+
+  // --- Delete a match (with cascade via RPC) ---
+  async function deleteMatch(matchId: string) {
+    if (!confirm('Delete this match and its participants? This cannot be undone.')) return
+    const { error } = await supabase.rpc('delete_match_cascade', { p_match_id: matchId })
+    if (error) {
+      alert(error.message)
+      return
+    }
+    await loadMatches()
   }
 
   if (!ok) {
@@ -124,6 +166,7 @@ export default function DevTools() {
 
   return (
     <div className="grid gap-4">
+      {/* Players list */}
       <div className="card">
         <div className="flex items-center justify-between">
           <h3 className="font-semibold">Players</h3>
@@ -144,6 +187,7 @@ export default function DevTools() {
         </ul>
       </div>
 
+      {/* Merge players */}
       <div className="card">
         <h3 className="font-semibold mb-2">Merge Players</h3>
         <div className="grid md:grid-cols-2 gap-2">
@@ -181,6 +225,7 @@ export default function DevTools() {
         </p>
       </div>
 
+      {/* Delete player */}
       <div className="card">
         <h3 className="font-semibold mb-2">Delete Player</h3>
         <div className="grid md:grid-cols-2 gap-2">
@@ -205,6 +250,66 @@ export default function DevTools() {
           (e.g., Perri/perri/PERRI) and cascades related records. Prefer Merge
           when the player has real matches you want to keep under one name.
         </p>
+      </div>
+
+      {/* Matches admin */}
+      <div className="card">
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold">Matches (latest 50)</h3>
+          <button className="btn" onClick={loadMatches} disabled={loadingMatches}>
+            {loadingMatches ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
+
+        <ul className="mt-3 space-y-3">
+          {matches.map((m) => {
+            const parts = m.participants ?? []
+            const t1 = parts.filter((x) => x.team === 1)
+            const t2 = parts.filter((x) => x.team === 2)
+            return (
+              <li
+                key={m.id}
+                className="border border-neutral-800 rounded-xl p-3 text-sm"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="text-neutral-400">
+                    {new Date(m.created_at).toLocaleString()} ·{' '}
+                    <span className="badge">Winner: {m.winner_team ?? '—'}</span>
+                  </div>
+                  <button className="btn btn-danger" onClick={() => deleteMatch(m.id)}>
+                    Delete Match
+                  </button>
+                </div>
+                <div className="grid md:grid-cols-2 gap-3 mt-2">
+                  <div>
+                    <div className="font-semibold mb-1">Team 1</div>
+                    <ul className="space-y-1">
+                      {t1.map((p, i) => (
+                        <li key={i}>
+                          {p.name} — {p.hero ?? '—'}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-semibold mb-1">Team 2</div>
+                    <ul className="space-y-1">
+                      {t2.map((p, i) => (
+                        <li key={i}>
+                          {p.name} — {p.hero ?? '—'}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+
+        {matches.length === 0 && (
+          <p className="text-sm text-neutral-400 mt-2">No matches yet.</p>
+        )}
       </div>
     </div>
   )
