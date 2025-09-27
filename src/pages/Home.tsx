@@ -15,12 +15,12 @@ const CHANGELOG: { version: string; date: string; items: string[] }[] = [
     version: 'v0.2.0',
     date: '2025-09-26',
     items: [
-      'Draft: polished — team-only picks before reveal, full two-team reveal after lock.',
+      'Draft: team-only picks pre-reveal; full two-team reveal after lock.',
       'Balancing: per-room rank + per-hero WR weighting; excluded heroes respected.',
       'Reroll: auto-regenerates when 4 players vote.',
       'Team Chat: teammates-only during draft.',
       'Stats: WR views fixed (no-data shows 50%).',
-      'Players: case-insensitive identity; canonical count for dashboard.',
+      'Players: case-insensitive identity; canonical player count for dashboard.',
       'Dev Tools: dropdown merge, canonical delete (by name), delete matches, manual match entry.',
     ],
   },
@@ -28,7 +28,7 @@ const CHANGELOG: { version: string; date: string; items: string[] }[] = [
     version: 'v0.1.0',
     date: '2025-09-24',
     items: [
-      'Initial release: create/join rooms, generate teams, indicate picks, lock & reveal, save results.',
+      'Initial release: rooms, generate teams, indicate picks, lock & reveal, save results.',
       'Match History & Data pages.',
     ],
   },
@@ -46,16 +46,17 @@ export default function Home() {
     ;(async () => {
       setLoading(true)
 
-      // total players = distinct lower(name)
+      // total players (case-insensitive distinct)
       const { data: playersCount, error: pcErr } = await supabase.rpc('count_players')
       if (pcErr) console.error(pcErr)
 
-      // total matches + latest match time
-      const { data: matchesAgg, error: mErr } = await supabase
+      // total matches: use count from response (data is null when head: true)
+      const { count: matchCount, error: mErr } = await supabase
         .from('matches')
-        .select('id, created_at', { count: 'exact', head: true })
+        .select('id', { count: 'exact', head: true })
       if (mErr) console.error(mErr)
 
+      // latest match timestamp
       const { data: latest, error: lErr } = await supabase
         .from('matches')
         .select('created_at')
@@ -66,7 +67,7 @@ export default function Home() {
 
       setSummary({
         totalPlayers: Number(playersCount ?? 0),
-        totalMatches: Number(matchesAgg?.length ?? 0) || (matchesAgg as any)?.count || 0,
+        totalMatches: Number(matchCount ?? 0),
         latestMatchAt: latest?.created_at ?? null,
       })
       setLoading(false)
@@ -189,7 +190,6 @@ export default function Home() {
         </ul>
       </div>
 
-      {/* Footer notice (optional) */}
       <div className="text-center text-xs text-neutral-500">
         © 2025 HOTS Draft — {VERSION}
       </div>
