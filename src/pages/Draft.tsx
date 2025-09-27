@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import type { HOTSRank } from '../state/types'
 
@@ -19,12 +19,15 @@ export default function Draft(){
   const [picks, setPicks] = useState<Record<string, PickRow>>({})
   const [meId, setMeId] = useState<string>('')
   const [myTeam, setMyTeam] = useState<1|2|null>(null)
-  const [locked, setLocked] = useState(false)
-  const [revealed, setRevealed] = useState(false)
 
+  const [status, setStatus] = useState<'open'|'locked'|'revealed'|'closed'>('open')
   const [chat, setChat] = useState<Chat[]>([])
   const [chatText, setChatText] = useState('')
   const chatBoxRef = useRef<HTMLDivElement>(null)
+
+  const stage: 'pre'|'draft'|'reveal' = status === 'revealed' || status === 'closed' ? 'reveal'
+    : status === 'locked' ? 'draft'
+    : 'pre'
 
   // AUTOSCROLL chat
   useEffect(()=>{
@@ -38,12 +41,9 @@ export default function Draft(){
     const int = setInterval(async ()=>{
       if(!roomId) return
 
-      // room status
-      const { data: r } = await supabase.from('rooms').select('status').eq('id', roomId).single()
-      if(r){
-        setLocked(r.status === 'locked' || r.status === 'revealed' || r.status === 'closed')
-        setRevealed(r.status === 'revealed' || r.status === 'closed')
-      }
+      // room status from DB (source of truth)
+      const { data: r } = await supabase.from('rooms').select('status').eq('id', roomId).maybeSingle()
+      if(r?.status) setStatus(r.status as any)
 
       // connected players
       const { data: rp } = await supabase.from('room_players_full').select('*').eq('room_id', roomId)
@@ -122,7 +122,7 @@ export default function Draft(){
     if(!rp || rp.length!==6) { alert('Need exactly 6 players'); return }
     const { error } = await supabase.rpc('generate_teams_and_choices', { p_room_id: roomId })
     if(error) { alert(error.message); return }
-    setLocked(true)
+    setStatus('locked')
   }
 
   async function indicatePick(hero:string){
@@ -146,7 +146,8 @@ export default function Draft(){
     if(!roomId) return
     const { error } = await supabase.from('rooms').update({ status:'revealed' }).eq('id', roomId)
     if(error) { alert(error.message); return }
-    setRevealed(true)
+    // UI will flip on next poll from DB; also set immediately:
+    setStatus('revealed')
   }
 
   async function saveResult(winner:1|2){
@@ -168,8 +169,14 @@ export default function Draft(){
     setChatText('')
   }
 
-  // derive my teammates and renders
   const teamMates = players.filter(p => p.team && p.team === myTeam)
+  const canLock = useMemo(()=>{
+    if(teamMates.length !== 3) return false
+    // require all 6 players to have indicated? (toggle: set to true to require)
+    const all = players.filter(p=>p.team===1 || p.team===2)
+    const allHave = all.every(p => picks[p.player_id]?.indicated)
+    return allHave
+  }, [players, picks, teamMates.length])
 
   return (
     <div className='grid gap-4'>
@@ -201,9 +208,12 @@ export default function Draft(){
         <div className='md:col-span-2'>
           <div className='flex items-center justify-between'>
             <h3 className='font-semibold'>Connected Players</h3>
-            {isHost && players.length===6 && !locked && (
-              <button className='btn btn-primary' onClick={generateTeamsOnce}>Generate Teams</button>
-            )}
+            <div className='flex items-center gap-2'>
+              <span className='badge'>STATUS: {status}</span>
+              {isHost && players.length===6 && status==='open' && (
+                <button className='btn btn-primary' onClick={generateTeamsOnce}>Generate Teams</button>
+              )}
+            </div>
           </div>
           <ul className='mt-2 grid grid-cols-2 gap-2'>
             {players.map(p=> (
@@ -217,8 +227,8 @@ export default function Draft(){
         </div>
       </div>
 
-      {/* === DRAFT STAGE UI (before reveal) === */}
-      {!revealed && locked && (
+      {/* === DRAFT STAGE (status locked) === */}
+      {stage==='draft' && (
         <>
           <div className='grid md:grid-cols-2 gap-4'>
             <div className='card'>
@@ -280,13 +290,17 @@ export default function Draft(){
 
           <div className='flex items-center gap-2 mt-3'>
             <button className='btn' onClick={voteReroll}>Reroll</button>
-            {isHost && <button className='btn btn-primary' onClick={lockAndReveal}>Lock & Reveal</button>}
+            {isHost && (
+              <button className='btn btn-primary' onClick={lockAndReveal} disabled={!canLock} title={canLock ? 'Lock & reveal' : 'Waiting for everyone to indicate a pick'}>
+                Lock & Reveal
+              </button>
+            )}
           </div>
         </>
       )}
 
-      {/* === REVEAL STAGE UI (both teams visible) === */}
-      {revealed && (
+      {/* === REVEAL STAGE (status revealed/closed) === */}
+      {stage==='reveal' && (
         <div className='card'>
           <h3 className='font-semibold mb-3'>Reveal — Teams & Picks</h3>
           <div className='grid md:grid-cols-2 gap-4'>
