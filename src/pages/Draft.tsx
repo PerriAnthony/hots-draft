@@ -78,14 +78,14 @@ export default function Draft(){
   }, [roomId, meId, myTeam])
 
   async function createRoom(){
-    // create or find self as player first so host_id can be set if desired
     const { data: r, error } = await supabase.from('rooms').insert({ pin: generatePin(), status:'open' }).select().single()
-    if(error) return alert(error.message)
+    if(error) { alert(error.message); return }
     setRoomId(r.id); setPin(r.pin); setIsHost(true)
   }
+
   async function joinByPin(){
     const { data: r, error } = await supabase.from('rooms').select('*').eq('pin', pin).single()
-    if(error || !r) return alert('Room not found')
+    if(error || !r) { alert('Room not found'); return }
     setRoomId(r.id); setIsHost(false)
   }
 
@@ -97,15 +97,16 @@ export default function Draft(){
     let playerId = existing?.id
     if(!playerId){
       const { data: p, error } = await supabase.from('players').insert({ name, rank }).select().single()
-      if(error) return alert(error.message)
+      if(error) { alert(error.message); return }
       playerId = p!.id
     }else{
-      // keep rank up to date (optional)
       await supabase.from('players').update({ rank }).eq('id', playerId)
     }
 
     setMeId(playerId!)
-    await supabase.from('room_players').upsert({ room_id: roomId, player_id: playerId }, { onConflict: 'room_id,player_id', ignoreDuplicates: true })
+    await supabase
+      .from('room_players')
+      .upsert({ room_id: roomId, player_id: playerId }, { onConflict: 'room_id,player_id', ignoreDuplicates: true })
 
     // if no host set, set host to first joiner (optional)
     const { data: room } = await supabase.from('rooms').select('host_id').eq('id', roomId).single()
@@ -118,15 +119,15 @@ export default function Draft(){
   async function generateTeamsOnce(){
     if(!roomId) return
     const { data: rp } = await supabase.from('room_players_full').select('*').eq('room_id', roomId)
-    if(!rp || rp.length!==6) return alert('Need exactly 6 players')
+    if(!rp || rp.length!==6) { alert('Need exactly 6 players'); return }
     const { error } = await supabase.rpc('generate_teams_and_choices', { p_room_id: roomId })
-    if(error) return alert(error.message)
+    if(error) { alert(error.message); return }
     setLocked(true)
   }
 
   async function indicatePick(hero:string){
     if(!roomId || !meId) return
-    const { data: row } = await supabase.from('picks').select('*').eq('room_id', roomId).eq('player_id', meId).single()
+    const { data: row } = await supabase.from('picks').select('*').eq('room_id', roomId).eq('player_id', meId).maybeSingle()
     if(!row){
       alert('No picks found for you yet. Did the host generate teams?')
       return
@@ -138,20 +139,20 @@ export default function Draft(){
   async function voteReroll(){
     if(!roomId || !meId) return
     const { error } = await supabase.from('reroll_votes').insert({ room_id: roomId, voter: meId })
-    if(error) return alert(error.message)
+    if(error) alert(error.message)
   }
 
   async function lockAndReveal(){
     if(!roomId) return
     const { error } = await supabase.from('rooms').update({ status:'revealed' }).eq('id', roomId)
-    if(error) return alert(error.message)
+    if(error) { alert(error.message); return }
     setRevealed(true)
   }
 
   async function saveResult(winner:1|2){
     if(!roomId) return
     const { error } = await supabase.rpc('finalize_match',{ p_room_id: roomId, p_winner_team: winner })
-    if(error) return alert(error.message)
+    if(error) { alert(error.message); return }
     alert('Saved!')
   }
 
@@ -163,13 +164,12 @@ export default function Draft(){
       sender: name,
       text: chatText.trim()
     })
-    if(error) return alert(error.message)
+    if(error) { alert(error.message); return }
     setChatText('')
   }
 
   // derive my teammates and renders
   const teamMates = players.filter(p => p.team && p.team === myTeam)
-  const otherTeam = players.filter(p => p.team && p.team !== myTeam)
 
   return (
     <div className='grid gap-4'>
@@ -217,83 +217,127 @@ export default function Draft(){
         </div>
       </div>
 
-      {locked && (
-        <div className='grid md:grid-cols-2 gap-4'>
-          <div className='card'>
-            <h3 className='font-semibold mb-2'>Your Team</h3>
-            {!myTeam && <p className='text-sm text-neutral-400'>Waiting for team assignment…</p>}
-            {!!myTeam && (
+      {/* === DRAFT STAGE UI (before reveal) === */}
+      {!revealed && locked && (
+        <>
+          <div className='grid md:grid-cols-2 gap-4'>
+            <div className='card'>
+              <h3 className='font-semibold mb-2'>Your Team</h3>
+              {!myTeam && <p className='text-sm text-neutral-400'>Waiting for team assignment…</p>}
+              {!!myTeam && (
+                <ul className='space-y-2'>
+                  {teamMates.map(tm => {
+                    const pk = picks[tm.player_id]
+                    return (
+                      <li key={tm.player_id} className='border border-neutral-800 rounded-xl p-3'>
+                        <div className='text-sm font-medium'>{tm.name} {tm.player_id===meId && <span className="badge ml-2">You</span>}</div>
+                        <div className='mt-1 flex flex-wrap gap-2'>
+                          {(pk?.choices ?? []).map(hero => (
+                            <button
+                              key={hero}
+                              className={'btn ' + (tm.player_id===meId ? 'btn-primary' : '')}
+                              disabled={tm.player_id!==meId}
+                              onClick={()=>indicatePick(hero)}
+                              title={tm.player_id===meId ? 'Indicate you will pick this hero' : 'Only the player can indicate'}
+                            >
+                              {hero}
+                            </button>
+                          ))}
+                        </div>
+                        {pk?.indicated && (
+                          <div className='text-xs text-neutral-400 mt-1'>
+                            Indicated: <span className='badge ml-1'>{pk.indicated}</span>
+                          </div>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className='card'>
+              <h3 className='font-semibold mb-2'>Team Chat</h3>
+              {!myTeam && <p className='text-sm text-neutral-400'>Join/submit identity to chat.</p>}
+              {!!myTeam && (
+                <>
+                  <div ref={chatBoxRef} className='border border-neutral-800 rounded-xl p-2 h-64 overflow-auto text-sm space-y-1 bg-neutral-950/40'>
+                    {chat.map((m, i)=> (
+                      <div key={i}>
+                        <span className='text-neutral-400'>{new Date(m.created_at).toLocaleTimeString()} </span>
+                        <span className='font-medium'>{m.sender}: </span>
+                        <span>{m.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className='flex gap-2 mt-2'>
+                    <input className='input' placeholder='Type message…' value={chatText} onChange={e=>setChatText(e.target.value)} />
+                    <button className='btn' onClick={sendChat}>Send</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className='flex items-center gap-2 mt-3'>
+            <button className='btn' onClick={voteReroll}>Reroll</button>
+            {isHost && <button className='btn btn-primary' onClick={lockAndReveal}>Lock & Reveal</button>}
+          </div>
+        </>
+      )}
+
+      {/* === REVEAL STAGE UI (both teams visible) === */}
+      {revealed && (
+        <div className='card'>
+          <h3 className='font-semibold mb-3'>Reveal — Teams & Picks</h3>
+          <div className='grid md:grid-cols-2 gap-4'>
+            <div>
+              <div className='font-semibold mb-2'>Team 1</div>
               <ul className='space-y-2'>
-                {teamMates.map(tm => {
+                {players.filter(p=>p.team===1).map(tm => {
                   const pk = picks[tm.player_id]
                   return (
-                    <li key={tm.player_id} className='border border-neutral-800 rounded-xl p-3'>
-                      <div className='text-sm font-medium'>{tm.name} {tm.player_id===meId && <span className="badge ml-2">You</span>}</div>
-                      <div className='mt-1 flex flex-wrap gap-2'>
-                        {(pk?.choices ?? []).map(hero => (
-                          <button
-                            key={hero}
-                            className={'btn ' + (tm.player_id===meId ? 'btn-primary' : '')}
-                            disabled={tm.player_id!==meId}
-                            onClick={()=>indicatePick(hero)}
-                            title={tm.player_id===meId ? 'Indicate you will pick this hero' : 'Only the player can indicate'}
-                          >
-                            {hero}
-                          </button>
-                        ))}
+                    <li key={tm.player_id} className='border border-neutral-800 rounded-xl p-3 text-sm'>
+                      <div className='font-medium'>{tm.name}</div>
+                      <div className='mt-1'>Pick: <span className='badge ml-1'>{pk?.indicated ?? '—'}</span></div>
+                      <div className='mt-2 text-neutral-400'>Options:
+                        <span className='ml-2'>{(pk?.choices ?? []).join(', ') || '—'}</span>
                       </div>
-                      {pk?.indicated && (
-                        <div className='text-xs text-neutral-400 mt-1'>
-                          Indicated: <span className='badge ml-1'>{pk.indicated}</span>
-                        </div>
-                      )}
                     </li>
                   )
                 })}
               </ul>
-            )}
+            </div>
+            <div>
+              <div className='font-semibold mb-2'>Team 2</div>
+              <ul className='space-y-2'>
+                {players.filter(p=>p.team===2).map(tm => {
+                  const pk = picks[tm.player_id]
+                  return (
+                    <li key={tm.player_id} className='border border-neutral-800 rounded-xl p-3 text-sm'>
+                      <div className='font-medium'>{tm.name}</div>
+                      <div className='mt-1'>Pick: <span className='badge ml-1'>{pk?.indicated ?? '—'}</span></div>
+                      <div className='mt-2 text-neutral-400'>Options:
+                        <span className='ml-2'>{(pk?.choices ?? []).join(', ') || '—'}</span>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
           </div>
-          <div className='card'>
-            <h3 className='font-semibold mb-2'>Team Chat</h3>
-            {!myTeam && <p className='text-sm text-neutral-400'>Join/submit identity to chat.</p>}
-            {!!myTeam && (
-              <>
-                <div ref={chatBoxRef} className='border border-neutral-800 rounded-xl p-2 h-64 overflow-auto text-sm space-y-1 bg-neutral-950/40'>
-                  {chat.map((m, i)=> (
-                    <div key={i}>
-                      <span className='text-neutral-400'>{new Date(m.created_at).toLocaleTimeString()} </span>
-                      <span className='font-medium'>{m.sender}: </span>
-                      <span>{m.text}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className='flex gap-2 mt-2'>
-                  <input className='input' placeholder='Type message…' value={chatText} onChange={e=>setChatText(e.target.value)} />
-                  <button className='btn' onClick={sendChat}>Send</button>
-                </div>
-              </>
-            )}
+
+          <div className='mt-4'>
+            <p className='text-sm text-neutral-300 mb-2'>Choose winner:</p>
+            <div className='flex gap-2'>
+              <button className='btn btn-primary' onClick={()=>saveResult(1)}>Team 1 Won</button>
+              <button className='btn btn-primary' onClick={()=>saveResult(2)}>Team 2 Won</button>
+            </div>
           </div>
         </div>
       )}
-
-      {locked && !revealed && (
-  <div className='flex items-center gap-3 flex-wrap'>
-    <button className='btn' onClick={voteReroll}>Reroll</button>
-    {(() => {
-      const allIndicated = players.length === 6 && players.every(p => (picks[p.player_id]?.indicated ?? null));
-      return (
-        <button
-          className={'btn btn-primary ' + (!allIndicated ? 'opacity-60 cursor-not-allowed' : '')}
-          onClick={allIndicated ? lockAndReveal : undefined}
-          title={allIndicated ? 'Reveal all picks' : 'All 6 players must indicate a pick before reveal'}
-        >
-          Lock & Reveal
-        </button>
-      );
-    })()}
-  </div>
-)}
+    </div>
+  )
+}
 
 function generatePin(){
   return Math.floor(1000 + Math.random()*9000).toString()
